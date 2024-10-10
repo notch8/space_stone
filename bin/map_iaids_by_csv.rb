@@ -1,6 +1,6 @@
 #!/usr/bin/env ruby
 
-# NOTE: Usage: bin/map_iaids_by_csv.rb path/to/csv
+# INFO: Usage: bin/map_iaids_by_csv.rb path/to/csv
 
 require 'csv'
 require 'json'

@@ -1,8 +1,8 @@
 #!/usr/bin/env ruby
 
-# NOTE: Usage: bin/migrate_iaids path/to/audit_json
+# INFO: Usage: bin/migrate_iaids path/to/audit_json
 
-# INFO: To use this script, you will first need to run:
+# NOTE: To use this script, you will first need to run:
 # - bin/map_iaids_by_csv.rb
 # - bin/audit_iaids.rb
 

@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# WARN: This script can run for a long time. Running this within a
+# screen session or as a background process is strongly recommended
+
+# INFO: Usage: bin/migrate_iaids path/to/audit_json
 # See bin/ia_to_s3_migrator
 
 STAGE_ENV=production docker compose run \

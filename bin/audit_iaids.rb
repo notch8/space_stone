@@ -1,8 +1,8 @@
 #!/usr/bin/env ruby
 
-# NOTE: Usage: bin/audit_iaids.rb path/to/json
+# INFO: Usage: bin/audit_iaids.rb path/to/json
 
-# INFO: To use this script, you will first need to run bin/map_iaids_by_csv.rb
+# NOTE: To use this script, you will first need to run bin/map_iaids_by_csv.rb
 
 require_relative '../lib/space_stone'
 require 'dotenv'
