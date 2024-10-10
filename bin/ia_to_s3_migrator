@@ -1,25 +1,78 @@
 #!/usr/bin/env ruby
 
+# TODO: include file path arg
 # Usage: bin/migrate_iaids
 
-require 'ruby-progressbar'
 require_relative '../lib/space_stone'
+require 'json'
+require 'pathname'
 
+Dotenv.load('.env.production')
+
+def check_concurrency_limit(increase)
+  return if (@potential_concurrent_executions + increase) < 1_000
+
+  sleep 600
+  @potential_concurrent_executions = 0
+end
+
+json_path = Pathname.new(ARGV[0])
+raise "No file found at #{json_path}" unless json_path.exist?
+
+hash = JSON.parse(File.read(json_path))
+preprocessable_iaids = hash.select { |_iaid, data| data['status'] == 'WARN' && !data.key?('processed_at') }
+@potential_concurrent_executions = 0
+
+logger = Logger.new('log/ia_to_s3_migrator.log')
 puts '== Tail log/ia_to_s3_migrator.log for logs =='
 
-iaids = File.read('tmp/iaids.txt').split("\n")
-logger = Logger.new('log/ia_to_s3_migrator.log')
-progressbar = ProgressBar.create(total: iaids.size, format: '%a %e %P% Processed: %c from %C')
-s3_bucket = SpaceStone::S3Service.bucket
+begin
+  preprocessable_iaids.each do |iaid, data|
+    if data['missing_files'].any?
+      concurrency_increase = data['ia_files'].size * 2
+      check_concurrency_limit(concurrency_increase)
+      logger.info("#{iaid} -- Downloading files from IA, extracting, and uploading to S3")
+      process_ia_id(iaid, '/store/tmp/fast-tmp')
+      hash[iaid]['processed_at'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
+      hash[iaid]['status'] = 'PENDING RE-AUDIT'
+      @potential_concurrent_executions += concurrency_increase
+    else
+      if data['missing_ocr'].any?
+        concurrency_increase = data['missing_ocr'].size
+        check_concurrency_limit(concurrency_increase)
+        logger.info("#{iaid} -- Sending these files to the OCR Lambda: #{data['missing_ocr'].join(', ')}")
+        data['missing_ocr'].each do |basename|
+          s3_file_path = "#{iaid}/downloads/#{basename}.jp2"
+          SpaceStone::SqsService.add(message: s3_file_path, queue: 'ocr')
+        end
+        hash[iaid]['processed_at'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
+        hash[iaid]['status'] = 'PENDING RE-AUDIT'
+        @potential_concurrent_executions += concurrency_increase
+      end
 
-iaids.each do |iaid|
-  # WARN: This dumbly checks for any downloads; if some files have been uploaded
-  # but some haven't, it will skip uploading all of them
-  if s3_bucket.objects(prefix: "#{iaid}/downloads").any?
-    logger.warn("== #{iaid} == Files have already been uploaded to S3, skipping")
-  else
-    logger.info("== #{iaid} == Downloading files...")
-    process_ia_id(iaid, '/store/tmp/fast-tmp')
+      if data['missing_thumbnails'].any?
+        concurrency_increase = data['missing_thumbnails'].size
+        check_concurrency_limit(concurrency_increase)
+        logger.info("#{iaid} -- Sending these files to the Thumbnail Lambda: #{data['missing_thumbnails'].join(', ')}")
+        data['missing_thumbnails'].each do |basename|
+          s3_file_path = "#{iaid}/downloads/#{basename}.jp2"
+          SpaceStone::SqsService.add(message: s3_file_path, queue: 'thumbnail')
+        end
+        hash[iaid]['processed_at'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
+        hash[iaid]['status'] = 'PENDING RE-AUDIT'
+        @potential_concurrent_executions += concurrency_increase
+      end
+    end
+  rescue => e
+    logger.error("#{iaid} -- ERROR -- #{e.detailed_message(highlight: false)}")
   end
-  progressbar.increment
+ensure
+  puts "\nBacking up existing data to #{json_path}.bak"
+  FileUtils.cp(json_path, "#{json_path}.bak")
+
+  File.open(json_path, 'w') do |file|
+    # file.puts JSON.pretty_generate(JSON.parse(hash.to_json))
+    file.puts hash.to_json
+  end
+  puts "Updated #{json_path}"
 end
