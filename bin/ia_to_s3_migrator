@@ -16,11 +16,24 @@ def check_concurrency_limit(increase)
   @potential_concurrent_executions = 0
 end
 
+def preprocess_within_concurrency_limit(iaid, concurrency_increase, msg)
+  raise StandardError, "Block containing preprocess logic for #{iaid} is required" unless block_given?
+
+  check_concurrency_limit(concurrency_increase)
+  logger.info(msg)
+
+  yield
+
+  @hash[iaid]['processed_at'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
+  @hash[iaid]['status'] = 'PENDING RE-AUDIT'
+  @potential_concurrent_executions += concurrency_increase
+end
+
 json_path = Pathname.new(ARGV[0])
 raise "No file found at #{json_path}" unless json_path.exist?
 
-hash = JSON.parse(File.read(json_path))
-preprocessable_iaids = hash.select { |_iaid, data| data['status'] == 'WARN' && !data.key?('processed_at') }
+@hash = JSON.parse(File.read(json_path))
+preprocessable_iaids = @hash.select { |_iaid, data| data['status'] == 'WARN' }
 @potential_concurrent_executions = 0
 
 logger = Logger.new('log/ia_to_s3_migrator.log')
@@ -30,37 +43,36 @@ begin
   preprocessable_iaids.each do |iaid, data|
     if data['missing_files'].any?
       concurrency_increase = data['ia_files'].size * 2
-      check_concurrency_limit(concurrency_increase)
-      logger.info("#{iaid} -- Downloading files from IA, extracting, and uploading to S3")
-      process_ia_id(iaid, '/store/tmp/fast-tmp')
-      hash[iaid]['processed_at'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
-      hash[iaid]['status'] = 'PENDING RE-AUDIT'
-      @potential_concurrent_executions += concurrency_increase
+      log_msg = "#{iaid} -- Downloading files from IA, extracting, and uploading to S3"
+
+      preprocess_within_concurrency_limit(iaid, concurrency_increase, log_msg) do
+        process_ia_id(iaid, '/store/tmp/fast-tmp')
+      end
     else
       if data['missing_ocr'].any?
-        concurrency_increase = data['missing_ocr'].size
-        check_concurrency_limit(concurrency_increase)
-        logger.info("#{iaid} -- Sending these files to the OCR Lambda: #{data['missing_ocr'].join(', ')}")
-        data['missing_ocr'].each do |basename|
-          s3_file_path = "#{iaid}/downloads/#{basename}.jp2"
-          SpaceStone::SqsService.add(message: s3_file_path, queue: 'ocr')
+        basenames = data['missing_ocr']
+        concurrency_increase = basenames.size
+        log_msg = "#{iaid} -- Sending these files to the OCR Lambda: #{basenames.join(', ')}"
+
+        preprocess_within_concurrency_limit(iaid, concurrency_increase, log_msg) do
+          basenames.each do |basename|
+            s3_file_path = "#{iaid}/downloads/#{basename}.jp2"
+            SpaceStone::SqsService.add(message: s3_file_path, queue: 'ocr')
+          end
         end
-        hash[iaid]['processed_at'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
-        hash[iaid]['status'] = 'PENDING RE-AUDIT'
-        @potential_concurrent_executions += concurrency_increase
       end
 
       if data['missing_thumbnails'].any?
-        concurrency_increase = data['missing_thumbnails'].size
-        check_concurrency_limit(concurrency_increase)
-        logger.info("#{iaid} -- Sending these files to the Thumbnail Lambda: #{data['missing_thumbnails'].join(', ')}")
-        data['missing_thumbnails'].each do |basename|
-          s3_file_path = "#{iaid}/downloads/#{basename}.jp2"
-          SpaceStone::SqsService.add(message: s3_file_path, queue: 'thumbnail')
+        basenames = data['missing_thumbnails']
+        concurrency_increase = basenames.size
+        log_msg = "#{iaid} -- Sending these files to the Thumbnail Lambda: #{basenames.join(', ')}"
+
+        preprocess_within_concurrency_limit(iaid, concurrency_increase, log_msg) do
+          basenames.each do |basename|
+            s3_file_path = "#{iaid}/downloads/#{basename}.jp2"
+            SpaceStone::SqsService.add(message: s3_file_path, queue: 'thumbnail')
+          end
         end
-        hash[iaid]['processed_at'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
-        hash[iaid]['status'] = 'PENDING RE-AUDIT'
-        @potential_concurrent_executions += concurrency_increase
       end
     end
   rescue => e
@@ -71,8 +83,8 @@ ensure
   FileUtils.cp(json_path, "#{json_path}.bak")
 
   File.open(json_path, 'w') do |file|
-    # file.puts JSON.pretty_generate(JSON.parse(hash.to_json))
-    file.puts hash.to_json
+    # file.puts JSON.pretty_generate(JSON.parse(@hash.to_json))
+    file.puts @hash.to_json
   end
   puts "Updated #{json_path}"
 end
