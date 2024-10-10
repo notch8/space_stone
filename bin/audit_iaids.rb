@@ -1,5 +1,10 @@
 #!/usr/bin/env ruby
 
+# NOTE: Usage: bin/audit_iaids.rb path/to/json
+
+# INFO: To use this script, you will first need to run bin/map_iaids_by_csv.rb
+
+require_relative '../lib/space_stone'
 require 'dotenv'
 require 'fileutils'
 require 'json'
@@ -7,7 +12,6 @@ require 'pathname'
 require 'ruby-progressbar'
 
 Dotenv.load('.env.production')
-load 'lib/space_stone.rb'
 
 def fetch_filenames_from_ia(iaid, data)
   ia_download_service = SpaceStone::IaDownload.new(id: iaid)
@@ -59,6 +63,7 @@ raise "No file found at #{json_path}" unless json_path.exist?
 
 hash = JSON.parse(File.read(json_path))
 @bucket = SpaceStone::S3Service.bucket
+logger = Logger.new('tmp/audit_debug.log')
 puts "\nTrack progress by tailing tmp/audit_debug.log\n\n"
 progressbar = ProgressBar.create(total: hash.keys.size, format: '%a %e %P% Processed: %c from %C')
 
@@ -79,11 +84,8 @@ begin
     data['missing_thumbnails'] = basenames(data['ia_files']) - basenames(data['s3_thumbnails'])
 
     log_status(data)
+    logger.info("#{iaid} -- #{data['status']}")
     progressbar.increment
-    File.open('tmp/audit_debug.log', 'a') do |f|
-      f.puts "#{iaid} -- #{data['status']}"
-    end
-    # progressbar.increment
   end
 ensure
   puts "\nBacking up existing data to #{json_path}.bak"
