@@ -1,7 +1,10 @@
 #!/usr/bin/env ruby
 
-# TODO: include file path arg
-# Usage: bin/migrate_iaids
+# NOTE: Usage: bin/migrate_iaids path/to/audit_json
+
+# INFO: To use this script, you will first need to run:
+# - bin/map_iaids_by_csv.rb
+# - bin/audit_iaids.rb
 
 require_relative '../lib/space_stone'
 require 'json'
@@ -10,8 +13,11 @@ require 'pathname'
 Dotenv.load('.env.production')
 
 def check_concurrency_limit(increase)
+  # Stay under the default AWS Lambda concurrency limit
   return if (@potential_concurrent_executions + increase) < 1_000
 
+  logger.debug('AWS Lambda concurrency limit reached, will continue after 10 minutes')
+  # HACK: Assume all active Lambda executions will finish within 10 minutes
   sleep 600
   @potential_concurrent_executions = 0
 end
@@ -29,6 +35,8 @@ def preprocess_within_concurrency_limit(iaid, concurrency_increase, msg)
   @potential_concurrent_executions += concurrency_increase
 end
 
+# ---
+
 json_path = Pathname.new(ARGV[0])
 raise "No file found at #{json_path}" unless json_path.exist?
 
@@ -42,6 +50,7 @@ puts '== Tail log/ia_to_s3_migrator.log for logs =='
 begin
   preprocessable_iaids.each do |iaid, data|
     if data['missing_files'].any?
+      # Count files twice: once for OCR and once for thumbnails
       concurrency_increase = data['ia_files'].size * 2
       log_msg = "#{iaid} -- Downloading files from IA, extracting, and uploading to S3"
 
@@ -83,7 +92,6 @@ ensure
   FileUtils.cp(json_path, "#{json_path}.bak")
 
   File.open(json_path, 'w') do |file|
-    # file.puts JSON.pretty_generate(JSON.parse(@hash.to_json))
     file.puts @hash.to_json
   end
   puts "Updated #{json_path}"
