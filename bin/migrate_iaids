@@ -7,8 +7,9 @@ set -e
 echo 'Starting IAID migration in the background'
 
 STAGE_ENV=production docker compose run \
+  --detach \
   --rm \
   --remove-orphans \
   --volume /store/tmp/fast-tmp:/store/tmp/fast-tmp \
   web \
-  "bundle exec bin/ia_to_s3_migrator $1" &
+  "bundle exec bin/ia_to_s3_migrator $1"

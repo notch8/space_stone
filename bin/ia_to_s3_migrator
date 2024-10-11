@@ -50,6 +50,8 @@ puts '== Tail log/ia_to_s3_migrator.log for logs =='
 begin
   preprocessable_iaids.each do |iaid, data|
     if data['missing_files'].any?
+      # TODO: remove once Internet Archive is back up
+      next
       # Count files twice: once for OCR and once for thumbnails
       concurrency_increase = data['ia_files'].size * 2
       log_msg = "#{iaid} -- Downloading files from IA, extracting, and uploading to S3"
