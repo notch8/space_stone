@@ -16,7 +16,7 @@ def check_concurrency_limit(increase)
   # Stay under the default AWS Lambda concurrency limit
   return if (@potential_concurrent_executions + increase) < 1_000
 
-  logger.debug('AWS Lambda concurrency limit reached, will continue after 10 minutes')
+  @logger.debug('AWS Lambda concurrency limit reached, will continue after 10 minutes')
   # HACK: Assume all active Lambda executions will finish within 10 minutes
   sleep 600
   @potential_concurrent_executions = 0
@@ -26,7 +26,7 @@ def preprocess_within_concurrency_limit(iaid, concurrency_increase, msg)
   raise StandardError, "Block containing preprocess logic for #{iaid} is required" unless block_given?
 
   check_concurrency_limit(concurrency_increase)
-  logger.info(msg)
+  @logger.info(msg)
 
   yield
 
@@ -44,7 +44,7 @@ raise "No file found at #{json_path}" unless json_path.exist?
 preprocessable_iaids = @hash.select { |_iaid, data| data['status'] == 'WARN' }
 @potential_concurrent_executions = 0
 
-logger = Logger.new('log/ia_to_s3_migrator.log')
+@logger = Logger.new('log/ia_to_s3_migrator.log')
 puts '== Tail log/ia_to_s3_migrator.log for logs =='
 
 begin
@@ -85,7 +85,7 @@ begin
       end
     end
   rescue => e
-    logger.error("#{iaid} -- ERROR -- #{e.detailed_message(highlight: false)}")
+    @logger.error("#{iaid} -- ERROR -- #{e.detailed_message(highlight: false)}")
   end
 ensure
   puts "\nBacking up existing data to #{json_path}.bak"
