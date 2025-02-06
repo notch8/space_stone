@@ -1,25 +1,98 @@
 #!/usr/bin/env ruby
 
-# Usage: bin/migrate_iaids
+# INFO: Usage: bin/migrate_iaids path/to/audit_json
 
-require 'ruby-progressbar'
+# NOTE: To use this script, you will first need to run:
+# - bin/map_iaids_by_csv.rb
+# - bin/audit_iaids.rb
+
 require_relative '../lib/space_stone'
+require 'json'
+require 'pathname'
 
+Dotenv.load('.env.production')
+
+def check_concurrency_limit(increase)
+  # Stay under the default AWS Lambda concurrency limit
+  return if (@potential_concurrent_executions + increase) < 1_000
+
+  @logger.debug('AWS Lambda concurrency limit reached, will continue after 10 minutes')
+  # HACK: Assume all active Lambda executions will finish within 10 minutes
+  sleep 600
+  @potential_concurrent_executions = 0
+end
+
+def preprocess_within_concurrency_limit(iaid, concurrency_increase, msg)
+  raise StandardError, "Block containing preprocess logic for #{iaid} is required" unless block_given?
+
+  check_concurrency_limit(concurrency_increase)
+  @logger.info(msg)
+
+  yield
+
+  @hash[iaid]['processed_at'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
+  @hash[iaid]['status'] = 'PENDING RE-AUDIT'
+  @potential_concurrent_executions += concurrency_increase
+end
+
+# ---
+
+json_path = Pathname.new(ARGV[0])
+raise "No file found at #{json_path}" unless json_path.exist?
+
+@hash = JSON.parse(File.read(json_path))
+preprocessable_iaids = @hash.select { |_iaid, data| data['status'] == 'WARN' }
+@potential_concurrent_executions = 0
+
+@logger = Logger.new('log/ia_to_s3_migrator.log')
 puts '== Tail log/ia_to_s3_migrator.log for logs =='
 
-iaids = File.read('tmp/iaids.txt').split("\n")
-logger = Logger.new('log/ia_to_s3_migrator.log')
-progressbar = ProgressBar.create(total: iaids.size, format: '%a %e %P% Processed: %c from %C')
-s3_bucket = SpaceStone::S3Service.bucket
+begin
+  preprocessable_iaids.each do |iaid, data|
+    if data['missing_files'].any?
+      # Count files twice: once for OCR and once for thumbnails
+      concurrency_increase = data['ia_files'].size * 2
+      log_msg = "#{iaid} -- Downloading files from IA, extracting, and uploading to S3"
 
-iaids.each do |iaid|
-  # WARN: This dumbly checks for any downloads; if some files have been uploaded
-  # but some haven't, it will skip uploading all of them
-  if s3_bucket.objects(prefix: "#{iaid}/downloads").any?
-    logger.warn("== #{iaid} == Files have already been uploaded to S3, skipping")
-  else
-    logger.info("== #{iaid} == Downloading files...")
-    process_ia_id(iaid, '/store/tmp/fast-tmp')
+      preprocess_within_concurrency_limit(iaid, concurrency_increase, log_msg) do
+        process_ia_id(iaid, '/store/tmp/fast-tmp')
+      end
+    else
+      if data['missing_ocr'].any?
+        basenames = data['missing_ocr']
+        concurrency_increase = basenames.size
+        log_msg = "#{iaid} -- Sending these files to the OCR Lambda: #{basenames.join(', ')}"
+
+        preprocess_within_concurrency_limit(iaid, concurrency_increase, log_msg) do
+          basenames.each do |basename|
+            s3_file_path = "#{iaid}/downloads/#{basename}.jp2"
+            SpaceStone::SqsService.add(message: s3_file_path, queue: 'ocr')
+          end
+        end
+      end
+
+      if data['missing_thumbnails'].any?
+        basenames = data['missing_thumbnails']
+        concurrency_increase = basenames.size
+        log_msg = "#{iaid} -- Sending these files to the Thumbnail Lambda: #{basenames.join(', ')}"
+
+        preprocess_within_concurrency_limit(iaid, concurrency_increase, log_msg) do
+          basenames.each do |basename|
+            s3_file_path = "#{iaid}/downloads/#{basename}.jp2"
+            SpaceStone::SqsService.add(message: s3_file_path, queue: 'thumbnail')
+          end
+        end
+      end
+    end
+  rescue => e
+    @logger.error("#{iaid} -- ERROR -- #{e.detailed_message(highlight: false)}")
   end
-  progressbar.increment
+ensure
+  puts "\nBacking up existing data to #{json_path}.bak"
+  FileUtils.cp(json_path, "#{json_path}.bak")
+
+  File.open(json_path, 'w') do |file|
+    file.puts @hash.to_json
+  end
+  puts "Updated #{json_path}"
 end

@@ -1,5 +1,7 @@
 #!/usr/bin/env ruby
 
+# INFO: Usage: bin/map_iaids_by_csv.rb path/to/csv
+
 require 'csv'
 require 'json'
 require 'fileutils'
@@ -27,7 +29,7 @@ json_path = Pathname.new("tmp/#{json_filename}")
 FileUtils.mkdir_p(json_path.dirname)
 
 File.open(json_path, 'w') do |file|
-  file.puts JSON.pretty_generate(JSON.parse(h.to_json))
+  file.puts h.to_json
 end
 
 puts "Output: #{json_path}"
