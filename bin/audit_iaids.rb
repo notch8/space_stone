@@ -15,10 +15,29 @@ Dotenv.load('.env.production')
 
 def fetch_filenames_from_ia(iaid, data)
   ia_download_service = SpaceStone::IaDownload.new(id: iaid)
-  url = "#{ia_download_service.remote_file_link}/" # trailing slash matters
+  max_retries = 3
+  base_delay = 5
+  attempt = 0
 
   response = begin
-               HTTParty.get(url, headers: { 'Cookie' => ia_download_service.login_cookies })
+               attempt += 1
+               url = "#{ia_download_service.remote_file_link}/" # trailing slash matters
+               if url == '/' || url.empty?
+                 data['status'] = 'ERROR -- Malformed URL, unable to find JP2 Zip link'
+                 false
+               else
+                 HTTParty.get(url, headers: { 'Cookie' => ia_download_service.login_cookies }, follow_redirects: true)
+               end
+             rescue Net::OpenTimeout => e
+               if attempt <= max_retries
+                 delay = base_delay * (2**attempt)
+                 puts "#{iaid} -- #{e.class} detected, retrying in #{delay} seconds..."
+                 sleep(delay)
+                 retry
+               else
+                 data['status'] = 'ERROR -- Timed out trying to connect to IA'
+                 false
+               end
              rescue Errno::ECONNREFUSED
                data['status'] = "ERROR -- Couldn't connect to IA"
                false
@@ -45,7 +64,7 @@ def basenames(paths)
 end
 
 def log_status(data)
-  return if data['status'] == "ERROR -- Couldn't connect to IA"
+  return if data['status'].match?(/^ERROR -- (Couldn't connect|Malformed|Timed out)/)
 
   data['status'] = if data['ia_files'].nil? || data['ia_files'].empty?
                      'ERROR -- No files found in IA'
@@ -69,6 +88,15 @@ progressbar = ProgressBar.create(total: hash.keys.size, format: '%a %e %P% Proce
 
 begin
   hash.each do |iaid, data|
+    progressbar.increment
+    if !data['last_checked'].nil? && ARGV[1]&.strip == '--skip-recent'
+      last_checked_time = DateTime.parse(data['last_checked'])
+      three_days_ago = DateTime.now - 3
+      if last_checked_time > three_days_ago
+        logger.debug("#{iaid} -- Skipped due to --skip-recent flag (last checked #{data['last_checked']})")
+        next
+      end
+    end
     data['last_checked'] = DateTime.now.strftime('%Y-%m-%dT%H:%M:%S')
 
     if !data.key?('ia_files') || data['ia_files'].empty?
@@ -85,7 +113,6 @@ begin
 
     log_status(data)
     logger.info("#{iaid} -- #{data['status']}")
-    progressbar.increment
   end
 ensure
   puts "\nBacking up existing data to #{json_path}.bak"
